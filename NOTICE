@@ -1,0 +1,16 @@
+This repository is a benchmark fixture derived from two open-source projects.
+
+1. NetworkX (directory networkx/ and the repository scaffolding)
+   Copyright (C) 2004-2026, NetworkX Developers. 3-clause BSD license,
+   reproduced in LICENSE.txt. Upstream: https://github.com/networkx/networkx
+
+2. boltons (directory boltons/, including boltons/tests/)
+   Copyright (c) 2013, Mahmoud Hashemi. 3-clause BSD license, reproduced in
+   boltons/LICENSE. Upstream: https://github.com/mahmoud/boltons
+   The upstream top-level tests/ directory was moved to boltons/tests/ and a
+   boltons/pytest.ini (doctest flags from upstream's pyproject.toml) was added.
+
+This fixture is a modified snapshot of the upstream source trees. It deliberately
+contains defects and omits some upstream tests; it is not an upstream release of
+either project and must not be used as a distribution of them. All credit for the
+libraries belongs to their developers.
