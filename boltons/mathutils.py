@@ -168,7 +168,7 @@ class Bits:
         self.val = val  # data is stored internally as integer
         self.len = len_
 
-    def __getitem__(self, k):
+    def __getitem__(self, k):  # index or slice
         if type(k) is slice:
             return Bits(self.as_bin()[k])
         if type(k) is int:
