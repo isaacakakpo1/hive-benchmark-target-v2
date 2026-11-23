@@ -1,0 +1,244 @@
+# CI for the Hive benchmark target v2 (NetworkX + boltons fixture).
+#
+# Two required checks (GitHub Actions, app id 15368):
+#   test    both public suites (networkx, boltons) as separate pytest sessions,
+#           repository config ignored, collected/passed floors per suite
+#   hidden  every task's hidden suite on the merge-base with the PR's target
+#           branch (main or int/**) and on the PR head;
+#           fails on regressions, on the PR's own task not passing, and on
+#           count mismatches / collection errors.  See .github/ci/hidden_ci.py.
+#
+# Logs of this public repository are public.  The hidden job prints only task
+# ids and pass/fail/count summaries; pytest output stays in private files that
+# are never printed or uploaded.  Do not add `set -x`, artifact uploads or
+# debug output to the hidden job.
+name: ci
+
+# main plus per-run integration branches (int/hive-<run>, int/afk-<run>, ...),
+# all cut from the same frozen base; see CI.md in the hidden repository.
+on:
+  pull_request:
+    branches: [main, "int/**"]
+  push:
+    branches: [main, "int/**"]
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12.13"
+  # Pinned hidden repository commit; bump with a reviewed .github/ change.
+  HIDDEN_REPO: team-telnyx/hive-benchmark-hidden
+  HIDDEN_COMMIT: d1212e7980dddbb7e6fff01af35f264982a67bc4
+  HIDDEN_SUBDIR: v2
+  # GitHub's published SSH host key (gh api meta .ssh_keys).
+  GITHUB_SSH_ED25519: AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+  # Fixture base B with this toolchain (JUnit counts):
+  #   networkx 9630 collected, 8499 passed, 1131 skipped/xfailed (390 skipped + 741 xfailed)
+  #   boltons   754 collected,  754 passed (732 tests + 22 subtest reports)
+  NX_MIN_COLLECTED: "9630"
+  NX_MIN_PASSED: "8499"
+  BL_MIN_COLLECTED: "754"
+  BL_MIN_PASSED: "754"
+  # boltons' doctest flags (upstream pyproject.toml, as in boltons/pytest.ini),
+  # passed explicitly so the repository's ini files are never read.
+  BOLTONS_DOCTEST_FLAGS: "ALLOW_UNICODE ELLIPSIS IGNORE_EXCEPTION_DETAIL NORMALIZE_WHITESPACE"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          check-latest: false
+
+      - name: Install pinned test toolchain
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install -q --no-deps --only-binary :all: \
+            --require-hashes -r .github/ci/requirements.txt
+          "$RUNNER_TEMP/venv/bin/python" -m pip install -q --no-deps --no-build-isolation -e .
+          "$RUNNER_TEMP/venv/bin/python" -m pip list
+
+      - name: NetworkX public suite (repository config ignored)
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/networkx-tmp"
+          mkdir -p "$tmp"
+          # -W error restates networkx's only ini option (filterwarnings = error)
+          env -u PYTEST_ADDOPTS -u PYTHONPATH -u PYTEST_PLUGINS TMPDIR="$tmp" \
+            "$RUNNER_TEMP/venv/bin/python" -m pytest \
+              -c /dev/null --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider \
+              -W error --doctest-modules -n 4 -q --no-header -rfE \
+              --basetemp="$tmp/basetemp" --junitxml="$RUNNER_TEMP/networkx.xml" \
+              networkx
+          "$RUNNER_TEMP/venv/bin/python" .github/ci/public_count.py "$RUNNER_TEMP/networkx.xml" \
+            --min-collected "$NX_MIN_COLLECTED" --min-passed "$NX_MIN_PASSED"
+
+      - name: boltons public suite (repository config ignored)
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          tmp="$RUNNER_TEMP/boltons-tmp"
+          mkdir -p "$tmp"
+          # separate session: networkx's filterwarnings=error must not apply here
+          env -u PYTEST_ADDOPTS -u PYTHONPATH -u PYTEST_PLUGINS TMPDIR="$tmp" \
+            "$RUNNER_TEMP/venv/bin/python" -m pytest \
+              -c /dev/null --rootdir "$GITHUB_WORKSPACE" -p no:cacheprovider \
+              -o "doctest_optionflags=$BOLTONS_DOCTEST_FLAGS" \
+              --doctest-modules -q --no-header -rfE \
+              --basetemp="$tmp/basetemp" --junitxml="$RUNNER_TEMP/boltons.xml" \
+              boltons
+          "$RUNNER_TEMP/venv/bin/python" .github/ci/public_count.py "$RUNNER_TEMP/boltons.xml" \
+            --min-collected "$BL_MIN_COLLECTED" --min-passed "$BL_MIN_PASSED"
+
+  hidden:
+    name: hidden
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Refuse fork pull requests
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::hidden checks only run for same-repository branches"
+          exit 1
+
+      - name: Check out PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          check-latest: false
+
+      - name: Fetch hidden repository (outside the workspace)
+        env:
+          HIDDEN_REPO_DEPLOY_KEY: ${{ secrets.HIDDEN_REPO_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [ -z "${HIDDEN_REPO_DEPLOY_KEY:-}" ]; then
+            echo "::error::HIDDEN_REPO_DEPLOY_KEY is not available to this run"
+            exit 1
+          fi
+          ssh_dir="$RUNNER_TEMP/hidden-ssh"
+          trap 'shred -u "$ssh_dir/key" 2>/dev/null || true; rm -rf "$ssh_dir"' EXIT
+          mkdir "$ssh_dir"
+          printf '%s\n' "$HIDDEN_REPO_DEPLOY_KEY" > "$ssh_dir/key"
+          printf 'github.com ssh-ed25519 %s\n' "$GITHUB_SSH_ED25519" > "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $ssh_dir/key -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ssh_dir/known_hosts"
+          hidden="$RUNNER_TEMP/hidden-repo"
+          git init -q "$hidden"
+          git -C "$hidden" fetch -q --depth 1 "git@github.com:${HIDDEN_REPO}.git" "$HIDDEN_COMMIT"
+          git -C "$hidden" -c advice.detachedHead=false checkout -q FETCH_HEAD
+          test "$(git -C "$hidden" rev-parse HEAD)" = "$HIDDEN_COMMIT"
+          echo "hidden repository at $HIDDEN_COMMIT"
+
+      - name: Prepare sandbox (separate uids, read-only trees, no network)
+        run: |
+          set -euo pipefail
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 755 /srv/hive-ci /srv/hive-ci/bin
+          for i in 0 1 2 3; do
+            sudo useradd --system --user-group --no-create-home --home-dir /nonexistent \
+              --shell /usr/sbin/nologin "hivecand$i"
+          done
+          cp .github/ci/hidden_ci.py .github/ci/hidden_pytest_runner.py /srv/hive-ci/bin/
+          chmod 644 /srv/hive-ci/bin/*.py
+          python -m venv /srv/hive-ci/venv
+          /srv/hive-ci/venv/bin/python -m pip install -q --no-deps --no-index --only-binary :all: \
+            --find-links "$RUNNER_TEMP/hidden-repo/$HIDDEN_SUBDIR/wheelhouse" \
+            --require-hashes -r .github/ci/requirements.txt
+          chmod -R a+rX,go-w /srv/hive-ci/venv
+          # The tool cache is world-writable (777 + ACLs) on hosted runners: make the
+          # interpreter the sandbox and this driver both use root-owned and read-only.
+          py_root="$(python -c 'import sys; print(sys.base_prefix)')"
+          sudo chown -R root:root "$py_root"
+          sudo chmod -R go-w "$py_root"
+          sudo setfacl -R -b "$py_root"
+          d="$py_root"
+          while [ "$d" != /opt ] && [ "$d" != / ]; do
+            sudo chmod go-w "$d"; sudo setfacl -b "$d"; d="$(dirname "$d")"
+          done
+          # sanity: a sandboxed child has another uid, no network, cannot read the
+          # hidden clone and cannot write the interpreter, venv or driver
+          sudo -n /usr/bin/unshare --net -- /usr/bin/setpriv --reuid=hivecand0 --regid=hivecand0 \
+            --clear-groups --no-new-privs -- /usr/bin/env -i /srv/hive-ci/venv/bin/python -I -c '
+          import os, socket, sys, sysconfig
+          assert os.getuid() != int(sys.argv[1])
+          try:
+              os.listdir(sys.argv[2]); sys.exit("sandbox can read the hidden clone")
+          except PermissionError:
+              pass
+          try:
+              socket.create_connection(("140.82.112.3", 443), timeout=3); sys.exit("sandbox has network")
+          except OSError:
+              pass
+          places = [sys.base_prefix, sysconfig.get_path("stdlib"), sysconfig.get_path("purelib"),
+                    sys.prefix, "/srv/hive-ci", "/srv/hive-ci/bin"]
+          places += [os.path.dirname(p) for p in places]
+          for place in places:
+              if os.access(place, os.W_OK):
+                  sys.exit("sandbox can write a trusted directory")
+          print("sandbox ok")
+          ' "$(id -u)" "$RUNNER_TEMP/hidden-repo"
+
+      - name: Hidden suites (base vs head)
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = pull_request ]; then
+            # compare against the branch this PR targets (main or an integration branch)
+            if ! printf '%s' "$BASE_REF" | grep -Eq '^(main|int/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*)$'; then
+              echo "FAIL unexpected base branch"
+              exit 1
+            fi
+            git fetch -q --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+            base="$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")"
+            echo "target branch: $BASE_REF"
+          elif [ -n "${PUSH_BEFORE:-}" ] && git cat-file -e "${PUSH_BEFORE}^{commit}" 2>/dev/null; then
+            base="$PUSH_BEFORE"
+          else
+            base="$(git rev-parse "$HEAD_SHA^" 2>/dev/null || echo "$HEAD_SHA")"
+          fi
+          logs="$RUNNER_TEMP/hidden-logs"   # private: never printed or uploaded
+          /srv/hive-ci/venv/bin/python -I /srv/hive-ci/bin/hidden_ci.py \
+            --hidden "$RUNNER_TEMP/hidden-repo/$HIDDEN_SUBDIR" \
+            --checkout "$GITHUB_WORKSPACE" \
+            --base "$base" --head "$HEAD_SHA" --head-ref "${HEAD_REF:-}" \
+            --work /srv/hive-ci/work --logs "$logs" \
+            --python /srv/hive-ci/venv/bin/python \
+            --sandbox-users hivecand0,hivecand1,hivecand2,hivecand3 \
+            --timeout 300 --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove hidden material
+        if: always()
+        run: |
+          for i in 0 1 2 3; do sudo -n pkill -KILL -u "hivecand$i" || true; done
+          sudo -n rm -rf /srv/hive-ci/work "$RUNNER_TEMP/hidden-repo" "$RUNNER_TEMP/hidden-logs" "$RUNNER_TEMP/hidden-ssh"
+          if [ -n "$(git -C "$GITHUB_WORKSPACE" status --porcelain --ignored)" ]; then
+            echo "::error::the hidden job modified the workspace"
+            exit 1
+          fi
